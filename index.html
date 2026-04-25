@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Matching Engine</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; background: #f9fafb; color: #111827; }
+        .card { background: white; padding: 24px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 24px; }
+        h1, h2 { margin-top: 0; }
+        label { display: block; font-weight: bold; margin-bottom: 8px; }
+        input[type="file"] { margin-bottom: 16px; display: block; }
+        button { background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+        button:hover { background: #1d4ed8; }
+        table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+        th, td { text-align: left; padding: 12px; border-bottom: 1px solid #e5e7eb; }
+        th { background: #f3f4f6; }
+        .error { color: #dc2626; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h1>Gale-Shapley Matching Engine</h1>
+        <p>Upload your Candidate preferences and Role rankings as CSV files to run the algorithm.</p>
+        
+        <label for="candidatesCsv">1. Upload Candidates CSV</label>
+        <input type="file" id="candidatesCsv" accept=".csv">
+
+        <label for="rolesCsv">2. Upload Roles & Division Rankings CSV</label>
+        <input type="file" id="rolesCsv" accept=".csv">
+
+        <button onclick="runAlgorithm()">Run Matching Algorithm</button>
+        <p id="statusMessage"></p>
+    </div>
+
+    <div class="card" id="resultsCard" style="display: none;">
+        <h2>Match Results</h2>
+        <table id="resultsTable">
+            <thead>
+                <tr>
+                    <th>Role ID</th>
+                    <th>Role Name</th>
+                    <th>Matched Candidate(s)</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+
+        <h2 style="margin-top: 32px;">Unmatched Candidates</h2>
+        <ul id="unmatchedList"></ul>
+    </div>
+
+    <script>
+        // Simple CSV parser
+        function parseCSV(text) {
+            const lines = text.split('\n').filter(line => line.trim() !== '');
+            const headers = lines[0].split(',').map(h => h.trim());
+            const data = [];
+            for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(',').map(v => v.trim());
+                let row = {};
+                headers.forEach((header, index) => {
+                    row[header] = values[index] || '';
+                });
+                data.push(row);
+            }
+            return data;
+        }
+
+        function readFile(file) {
+            return new Promise((resolve, reject) => {
+                if (!file) return reject("No file selected.");
+                const reader = new FileReader();
+                reader.onload = e => resolve(e.target.result);
+                reader.onerror = e => reject("Error reading file.");
+                reader.readAsText(file);
+            });
+        }
+
+        async function runAlgorithm() {
+            const statusMsg = document.getElementById('statusMessage');
+            statusMsg.textContent = "Processing...";
+            statusMsg.className = "";
+
+            const candFile = document.getElementById('candidatesCsv').files[0];
+            const roleFile = document.getElementById('rolesCsv').files[0];
+
+            if (!candFile || !roleFile) {
+                statusMsg.textContent = "Please upload both CSV files.";
+                statusMsg.className = "error";
+                return;
+            }
+
+            try {
+                const candText = await readFile(candFile);
+                const roleText = await readFile(roleFile);
+
+                const candData = parseCSV(candText);
+                const roleData = parseCSV(roleText);
+
+                executeGaleShapley(candData, roleData);
+                statusMsg.textContent = "Matching complete!";
+            } catch (err) {
+                statusMsg.textContent = "Error: " + err;
+                statusMsg.className = "error";
+            }
+        }
+
+        function executeGaleShapley(candData, roleData) {
+            // Build Candidate Objects
+            let candidates = {};
+            candData.forEach(c => {
+                if(!c.CandidateID) return;
+                candidates[c.CandidateID] = {
+                    id: c.CandidateID,
+                    name: c.Name || c.CandidateID,
+                    preferences: [c.Pref1, c.Pref2, c.Pref3, c.Pref4, c.Pref5, c.Pref6].filter(Boolean),
+                    currentMatch: null
+                };
+            });
+
+            // Build Role Objects
+            let roles = {};
+            roleData.forEach(r => {
+                if(!r.RoleID) return;
+                let rankings = [];
+                // Collect ranked candidates dynamically based on headers starting with 'Rank'
+                Object.keys(r).forEach(key => {
+                    if (key.startsWith('Rank') && r[key]) rankings.push(r[key]);
+                });
+
+                roles[r.RoleID] = {
+                    id: r.RoleID,
+                    name: r.RoleName || r.RoleID,
+                    seats: parseInt(r.SeatsAvailable) || 1,
+                    rankings: rankings,
+                    proposedIndex: 0,
+                    matches: []
+                };
+            });
+
+            // The Algorithm (Role-Proposing)
+            let matchingComplete = false;
+
+            while (!matchingComplete) {
+                matchingComplete = true; // Assume done unless a role proposes
+
+                // Find roles that still have open seats AND haven't exhausted their list
+                let activeRoles = Object.values(roles).filter(r => r.matches.length < r.seats && r.proposedIndex < r.rankings.length);
+
+                for (let role of activeRoles) {
+                    matchingComplete = false; // We are making a move, so loop again next time
+                    
+                    let candidateId = role.rankings[role.proposedIndex];
+                    role.proposedIndex++; // Move down the list for next time
+
+                    let candidate = candidates[candidateId];
+                    if (!candidate) continue; // Candidate ID from division head doesn't exist in system
+
+                    if (!candidate.currentMatch) {
+                        // Candidate is free, tentatively accept
+                        candidate.currentMatch = role.id;
+                        role.matches.push(candidate.id);
+                    } else {
+                        // Candidate is already matched, check preferences
+                        let currentMatchId = candidate.currentMatch;
+                        
+                        let rankCurrent = candidate.preferences.indexOf(currentMatchId);
+                        let rankNew = candidate.preferences.indexOf(role.id);
+
+                        // If a role isn't in their preferences, assign it a terrible rank (999)
+                        if (rankCurrent === -1) rankCurrent = 999;
+                        if (rankNew === -1) rankNew = 999;
+
+                        // Lower index means higher preference
+                        if (rankNew < rankCurrent) {
+                            // Candidate prefers new role. Swap!
+                            candidate.currentMatch = role.id;
+                            role.matches.push(candidate.id);
+                            
+                            // Remove candidate from the old role's match list
+                            let oldRole = roles[currentMatchId];
+                            oldRole.matches = oldRole.matches.filter(id => id !== candidate.id);
+                        }
+                        // If candidate prefers current match, do nothing (reject new proposal)
+                    }
+                }
+            }
+
+            renderResults(roles, candidates);
+        }
+
+        function renderResults(roles, candidates) {
+            document.getElementById('resultsCard').style.display = 'block';
+            const tbody = document.querySelector('#resultsTable tbody');
+            tbody.innerHTML = '';
+
+            // Render matched roles
+            Object.values(roles).forEach(role => {
+                let tr = document.createElement('tr');
+                let matchedNames = role.matches.map(id => candidates[id] ? candidates[id].name : id).join(', ');
+                if (role.matches.length < role.seats) {
+                    matchedNames += ` <span class="error">(Needs ${role.seats - role.matches.length} more)</span>`;
+                }
+
+                tr.innerHTML = `
+                    <td>${role.id}</td>
+                    <td>${role.name}</td>
+                    <td>${matchedNames || '<span style="color:#9ca3af; font-style:italic;">Unfilled</span>'}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            // Render unmatched candidates
+            const unmatchedList = document.getElementById('unmatchedList');
+            unmatchedList.innerHTML = '';
+            let unmatchedCount = 0;
+            
+            Object.values(candidates).forEach(cand => {
+                if (!cand.currentMatch) {
+                    unmatchedCount++;
+                    let li = document.createElement('li');
+                    li.textContent = `${cand.name} (${cand.id})`;
+                    unmatchedList.appendChild(li);
+                }
+            });
+
+            if (unmatchedCount === 0) {
+                unmatchedList.innerHTML = '<li><em style="color:green;">All candidates were matched!</em></li>';
+            }
+        }
+    </script>
+</body>
+</html>

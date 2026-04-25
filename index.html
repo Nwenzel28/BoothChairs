@@ -14,14 +14,15 @@
         input[type="file"] { display: block; width: 100%; }
         .btn { background: #2563eb; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 16px; }
         .btn:hover { background: #1d4ed8; }
-        .btn-secondary { background: #10b981; margin-top: 16px; }
+        .btn-secondary { background: #10b981; margin-top: 0; }
         .btn-secondary:hover { background: #059669; }
         table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
         th, td { text-align: left; padding: 12px; border-bottom: 1px solid #e5e7eb; }
         th { background: #f9fafb; font-weight: 600; }
         .error { color: #dc2626; font-weight: bold; padding: 12px; background: #fee2e2; border-radius: 6px; margin-top: 16px; display: none; }
+        .badge-warning { background: #fef08a; color: #854d0e; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; }
         
-        /* New styles for the audit log */
+        /* Audit log styles */
         .log-container { background: #1f2937; color: #10b981; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 13px; max-height: 300px; overflow-y: auto; margin-top: 24px; display: none; }
         .log-entry { margin-bottom: 4px; }
         .log-swap { color: #f59e0b; }
@@ -36,11 +37,13 @@
         
         <div class="form-group">
             <label>1. Candidates CSV</label>
+            <p style="font-size: 13px; color: #6b7280; margin-top: 0;">Required headers: CandidateID, Name, Pref1...Pref6</p>
             <input type="file" id="candidatesCsv" accept=".csv">
         </div>
 
         <div class="form-group">
             <label>2. Roles & Rankings CSV</label>
+            <p style="font-size: 13px; color: #6b7280; margin-top: 0;">Required headers: RoleID, RoleName, SeatsAvailable (or Seats), Rank1...RankN</p>
             <input type="file" id="rolesCsv" accept=".csv">
         </div>
 
@@ -51,9 +54,12 @@
     </div>
 
     <div class="card" id="resultsCard" style="display: none;">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
             <h2>Match Results</h2>
-            <button class="btn btn-secondary" onclick="exportResults()">Download Final Matches (CSV)</button>
+            <div style="display: flex; align-items: center;">
+                <span id="lastUpdated" style="font-size: 13px; color: #6b7280; margin-right: 16px; font-weight: bold;"></span>
+                <button class="btn btn-secondary" onclick="exportResults()">Download Final Matches (CSV)</button>
+            </div>
         </div>
         
         <table id="resultsTable">
@@ -62,10 +68,14 @@
                     <th>Role ID</th>
                     <th>Role Name</th>
                     <th>Matched Candidate(s)</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody></tbody>
         </table>
+
+        <h2 style="margin-top: 40px;">Unmatched Candidates</h2>
+        <ul id="unmatchedList" style="line-height: 1.8;"></ul>
     </div>
 
     <script>
@@ -155,10 +165,15 @@
                 Object.keys(r).forEach(key => {
                     if (key.startsWith('Rank') && r[key]) rankings.push(r[key]);
                 });
+                
+                // FIXED: More robust check for "Seats Available" to support different header formats
+                let seatsParsed = parseInt(r.SeatsAvailable || r['Seats Available'] || r.Seats || r.seats);
+                let actualSeats = isNaN(seatsParsed) ? 1 : seatsParsed;
+
                 roles[r.RoleID] = {
                     id: r.RoleID,
                     name: r.RoleName || r.RoleID,
-                    seats: parseInt(r.SeatsAvailable) || 1,
+                    seats: actualSeats,
                     rankings: rankings,
                     proposedIndex: 0,
                     matches: []
@@ -168,7 +183,6 @@
             let matchingComplete = false;
             let round = 1;
 
-            // This is the core Gale-Shapley logic
             while (!matchingComplete && round < 1000) {
                 matchingComplete = true; 
                 let activeRoles = Object.values(roles).filter(r => r.matches.length < r.seats && r.proposedIndex < r.rankings.length);
@@ -187,7 +201,6 @@
                     logContainer.appendChild(logMsg);
 
                     if (!candidate.currentMatch) {
-                        // Candidate is free, tentatively accepts
                         candidate.currentMatch = role.id;
                         role.matches.push(candidate.id);
                         
@@ -196,7 +209,6 @@
                         logAcc.innerHTML = `&nbsp;&nbsp;&rarr; ${candidate.name} is free. <strong>Tentatively accepts.</strong>`;
                         logContainer.appendChild(logAcc);
                     } else {
-                        // Candidate is already matched, time to compare preferences
                         let currentMatchId = candidate.currentMatch;
                         let oldRole = roles[currentMatchId];
                         
@@ -206,7 +218,6 @@
                         if (rankNew === -1) rankNew = 999;
 
                         if (rankNew < rankCurrent) {
-                            // Candidate prefers the NEW offer over the OLD offer. Swap!
                             candidate.currentMatch = role.id;
                             role.matches.push(candidate.id);
                             oldRole.matches = oldRole.matches.filter(id => id !== candidate.id);
@@ -216,7 +227,6 @@
                             logSwap.innerHTML = `&nbsp;&nbsp;&rarr; SWAP! ${candidate.name} prefers ${role.name}. Dumps ${oldRole.name}.`;
                             logContainer.appendChild(logSwap);
                         } else {
-                            // Candidate prefers their CURRENT offer and rejects the new one.
                             let logRej = document.createElement('div');
                             logRej.className = 'log-entry log-reject';
                             logRej.innerHTML = `&nbsp;&nbsp;&rarr; REJECTED. ${candidate.name} prefers their current hold (${oldRole.name}).`;
@@ -230,28 +240,60 @@
             let logEnd = document.createElement('div');
             logEnd.innerHTML = '<br><strong style="color:white;">--- ALGORITHM TERMINATED (STABLE MATCH REACHED) ---</strong>';
             logContainer.appendChild(logEnd);
-            logContainer.scrollTop = logContainer.scrollHeight; // Auto-scroll to bottom
+            logContainer.scrollTop = logContainer.scrollHeight; 
 
             finalCandidates = candidates;
             finalRoles = roles;
+            
+            // Add the Timestamp
+            let now = new Date();
+            document.getElementById('lastUpdated').textContent = "Last Run: " + now.toLocaleTimeString() + " on " + now.toLocaleDateString();
+
             renderResults(roles, candidates);
         }
 
         function renderResults(roles, candidates) {
             document.getElementById('resultsCard').style.display = 'block';
+            
+            // 1. Render Matched Roles Table
             const tbody = document.querySelector('#resultsTable tbody');
             tbody.innerHTML = '';
 
             Object.values(roles).forEach(role => {
                 let tr = document.createElement('tr');
-                let matchedNames = role.matches.map(id => candidates[id] ? candidates[id].name : id).join(', ');
+                let matchedNames = role.matches.map(id => candidates[id] ? `${candidates[id].name} (${id})` : id).join('<br>');
+                
+                let statusHtml = '<span style="color: #059669; font-weight:bold;">Filled</span>';
+                if (role.matches.length < role.seats) {
+                    statusHtml = `<span class="badge-warning">Missing ${role.seats - role.matches.length} seat(s)</span>`;
+                }
+
                 tr.innerHTML = `
                     <td><strong>${role.id}</strong></td>
                     <td>${role.name}</td>
-                    <td>${matchedNames || '<span style="color:#9ca3af;">Unfilled</span>'}</td>
+                    <td>${matchedNames || '<span style="color:#9ca3af; font-style:italic;">Unfilled</span>'}</td>
+                    <td>${statusHtml}</td>
                 `;
                 tbody.appendChild(tr);
             });
+
+            // 2. Render Unmatched Candidates List
+            const unmatchedList = document.getElementById('unmatchedList');
+            unmatchedList.innerHTML = '';
+            let unmatchedCount = 0;
+            
+            Object.values(candidates).forEach(cand => {
+                if (!cand.currentMatch) {
+                    unmatchedCount++;
+                    let li = document.createElement('li');
+                    li.innerHTML = `<strong>${cand.name}</strong> (${cand.id}) - <span style="color:#6b7280;">Preferences: ${cand.preferences.join(', ') || 'None'}</span>`;
+                    unmatchedList.appendChild(li);
+                }
+            });
+
+            if (unmatchedCount === 0) {
+                unmatchedList.innerHTML = '<li><span style="color:#059669; font-weight:bold;">All candidates were successfully matched!</span></li>';
+            }
         }
 
         function exportResults() {

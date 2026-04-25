@@ -12,7 +12,7 @@
         .form-group { margin-bottom: 20px; padding: 16px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; }
         label { display: block; font-weight: 600; margin-bottom: 8px; color: #374151; }
         input[type="file"] { display: block; width: 100%; }
-        .btn { background: #2563eb; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 16px; transition: background 0.2s; }
+        .btn { background: #2563eb; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 16px; }
         .btn:hover { background: #1d4ed8; }
         .btn-secondary { background: #10b981; margin-top: 16px; }
         .btn-secondary:hover { background: #059669; }
@@ -20,37 +20,40 @@
         th, td { text-align: left; padding: 12px; border-bottom: 1px solid #e5e7eb; }
         th { background: #f9fafb; font-weight: 600; }
         .error { color: #dc2626; font-weight: bold; padding: 12px; background: #fee2e2; border-radius: 6px; margin-top: 16px; display: none; }
-        .success { color: #059669; font-weight: bold; margin-top: 16px; display: none; }
-        .badge-warning { background: #fef08a; color: #854d0e; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+        
+        /* New styles for the audit log */
+        .log-container { background: #1f2937; color: #10b981; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 13px; max-height: 300px; overflow-y: auto; margin-top: 24px; display: none; }
+        .log-entry { margin-bottom: 4px; }
+        .log-swap { color: #f59e0b; }
+        .log-reject { color: #ef4444; }
     </style>
 </head>
 <body>
 
     <div class="card">
-        <h1>Matching Engine</h1>
-        <p>Upload your candidate preferences and role rankings to run the placement algorithm.</p>
+        <h1>Gale-Shapley Matching Engine</h1>
+        <p>Upload your data to run the placement algorithm.</p>
         
         <div class="form-group">
-            <label for="candidatesCsv">1. Candidates CSV</label>
-            <p style="font-size: 13px; color: #6b7280; margin-top: 0;">Required headers: CandidateID, Name, Pref1...Pref6</p>
+            <label>1. Candidates CSV</label>
             <input type="file" id="candidatesCsv" accept=".csv">
         </div>
 
         <div class="form-group">
-            <label for="rolesCsv">2. Roles & Rankings CSV</label>
-            <p style="font-size: 13px; color: #6b7280; margin-top: 0;">Required headers: RoleID, RoleName, SeatsAvailable, Rank1...RankN</p>
+            <label>2. Roles & Rankings CSV</label>
             <input type="file" id="rolesCsv" accept=".csv">
         </div>
 
         <button class="btn" onclick="runAlgorithm()">Run Algorithm</button>
         <div id="errorMessage" class="error"></div>
-        <div id="successMessage" class="success"></div>
+        
+        <div id="auditLog" class="log-container"></div>
     </div>
 
     <div class="card" id="resultsCard" style="display: none;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <h2>Match Results</h2>
-            <button class="btn btn-secondary" onclick="exportResults()">Download CSV</button>
+            <button class="btn btn-secondary" onclick="exportResults()">Download Final Matches (CSV)</button>
         </div>
         
         <table id="resultsTable">
@@ -59,22 +62,16 @@
                     <th>Role ID</th>
                     <th>Role Name</th>
                     <th>Matched Candidate(s)</th>
-                    <th>Status</th>
                 </tr>
             </thead>
             <tbody></tbody>
         </table>
-
-        <h2 style="margin-top: 40px;">Unmatched Candidates</h2>
-        <ul id="unmatchedList" style="line-height: 1.8;"></ul>
     </div>
 
     <script>
-        // Global variables to store final data for export
         let finalCandidates = {};
         let finalRoles = {};
 
-        // Robust CSV Parser (handles quotes containing commas)
         function parseCSV(text) {
             const result = [];
             const rows = text.split(/\r?\n/);
@@ -82,8 +79,7 @@
 
             const splitCSVRow = (str) => {
                 const arr = [];
-                let quote = false;
-                let cell = '';
+                let quote = false; let cell = '';
                 for (let i = 0; i < str.length; i++) {
                     let char = str[i];
                     if (char === '"' && str[i+1] === '"') { cell += '"'; i++; } 
@@ -96,14 +92,11 @@
             };
 
             const headers = splitCSVRow(rows[0]);
-
             for (let i = 1; i < rows.length; i++) {
-                if (!rows[i].trim()) continue; // Skip empty rows
+                if (!rows[i].trim()) continue;
                 const values = splitCSVRow(rows[i]);
                 const row = {};
-                headers.forEach((header, index) => {
-                    row[header] = values[index] || '';
-                });
+                headers.forEach((header, index) => { row[header] = values[index] || ''; });
                 result.push(row);
             }
             return result;
@@ -118,61 +111,38 @@
             });
         }
 
-        function showError(msg) {
-            const errDiv = document.getElementById('errorMessage');
-            errDiv.textContent = msg;
-            errDiv.style.display = 'block';
-            document.getElementById('successMessage').style.display = 'none';
-        }
-
-        function showSuccess(msg) {
-            const sucDiv = document.getElementById('successMessage');
-            sucDiv.textContent = msg;
-            sucDiv.style.display = 'block';
-            document.getElementById('errorMessage').style.display = 'none';
-        }
-
         async function runAlgorithm() {
             document.getElementById('errorMessage').style.display = 'none';
-            document.getElementById('successMessage').style.display = 'none';
+            const logContainer = document.getElementById('auditLog');
+            logContainer.innerHTML = '<div style="color:white; margin-bottom:8px; font-weight:bold;">--- ALGORITHM ENGINE STARTED ---</div>';
+            logContainer.style.display = 'block';
 
             const candFile = document.getElementById('candidatesCsv').files[0];
             const roleFile = document.getElementById('rolesCsv').files[0];
 
             if (!candFile || !roleFile) {
-                return showError("Please upload both Candidate and Role CSV files.");
+                document.getElementById('errorMessage').textContent = "Please upload both CSV files.";
+                document.getElementById('errorMessage').style.display = 'block';
+                return;
             }
 
             try {
-                const candText = await readFile(candFile);
-                const roleText = await readFile(roleFile);
-
-                const candData = parseCSV(candText);
-                const roleData = parseCSV(roleText);
-
-                // Validation
-                if (candData.length > 0 && !candData[0].hasOwnProperty('CandidateID')) {
-                    return showError("Candidates CSV is missing required 'CandidateID' header.");
-                }
-                if (roleData.length > 0 && !roleData[0].hasOwnProperty('RoleID')) {
-                    return showError("Roles CSV is missing required 'RoleID' header.");
-                }
-
-                executeGaleShapley(candData, roleData);
-                showSuccess("Matching complete!");
+                const candData = parseCSV(await readFile(candFile));
+                const roleData = parseCSV(await readFile(roleFile));
+                executeGaleShapley(candData, roleData, logContainer);
             } catch (err) {
-                showError("System Error: " + err);
+                document.getElementById('errorMessage').textContent = "System Error: " + err;
+                document.getElementById('errorMessage').style.display = 'block';
             }
         }
 
-        function executeGaleShapley(candData, roleData) {
+        function executeGaleShapley(candData, roleData, logContainer) {
             let candidates = {};
             candData.forEach(c => {
                 if(!c.CandidateID) return;
                 candidates[c.CandidateID] = {
                     id: c.CandidateID,
                     name: c.Name || c.CandidateID,
-                    originalData: c, // Keep all extra columns for export
                     preferences: [c.Pref1, c.Pref2, c.Pref3, c.Pref4, c.Pref5, c.Pref6].filter(Boolean),
                     currentMatch: null
                 };
@@ -185,7 +155,6 @@
                 Object.keys(r).forEach(key => {
                     if (key.startsWith('Rank') && r[key]) rankings.push(r[key]);
                 });
-
                 roles[r.RoleID] = {
                     id: r.RoleID,
                     name: r.RoleName || r.RoleID,
@@ -197,50 +166,74 @@
             });
 
             let matchingComplete = false;
-            let safetyCounter = 0; // Prevent infinite loops just in case
+            let round = 1;
 
-            while (!matchingComplete && safetyCounter < 10000) {
+            // This is the core Gale-Shapley logic
+            while (!matchingComplete && round < 1000) {
                 matchingComplete = true; 
-                safetyCounter++;
-
                 let activeRoles = Object.values(roles).filter(r => r.matches.length < r.seats && r.proposedIndex < r.rankings.length);
 
                 for (let role of activeRoles) {
                     matchingComplete = false; 
-                    
                     let candidateId = role.rankings[role.proposedIndex];
                     role.proposedIndex++; 
 
                     let candidate = candidates[candidateId];
                     if (!candidate) continue; 
 
+                    let logMsg = document.createElement('div');
+                    logMsg.className = 'log-entry';
+                    logMsg.textContent = `[Round ${round}] ${role.name} proposes to ${candidate.name}.`;
+                    logContainer.appendChild(logMsg);
+
                     if (!candidate.currentMatch) {
+                        // Candidate is free, tentatively accepts
                         candidate.currentMatch = role.id;
                         role.matches.push(candidate.id);
+                        
+                        let logAcc = document.createElement('div');
+                        logAcc.className = 'log-entry';
+                        logAcc.innerHTML = `&nbsp;&nbsp;&rarr; ${candidate.name} is free. <strong>Tentatively accepts.</strong>`;
+                        logContainer.appendChild(logAcc);
                     } else {
+                        // Candidate is already matched, time to compare preferences
                         let currentMatchId = candidate.currentMatch;
+                        let oldRole = roles[currentMatchId];
                         
                         let rankCurrent = candidate.preferences.indexOf(currentMatchId);
                         let rankNew = candidate.preferences.indexOf(role.id);
-
                         if (rankCurrent === -1) rankCurrent = 999;
                         if (rankNew === -1) rankNew = 999;
 
                         if (rankNew < rankCurrent) {
+                            // Candidate prefers the NEW offer over the OLD offer. Swap!
                             candidate.currentMatch = role.id;
                             role.matches.push(candidate.id);
-                            
-                            let oldRole = roles[currentMatchId];
                             oldRole.matches = oldRole.matches.filter(id => id !== candidate.id);
+                            
+                            let logSwap = document.createElement('div');
+                            logSwap.className = 'log-entry log-swap';
+                            logSwap.innerHTML = `&nbsp;&nbsp;&rarr; SWAP! ${candidate.name} prefers ${role.name}. Dumps ${oldRole.name}.`;
+                            logContainer.appendChild(logSwap);
+                        } else {
+                            // Candidate prefers their CURRENT offer and rejects the new one.
+                            let logRej = document.createElement('div');
+                            logRej.className = 'log-entry log-reject';
+                            logRej.innerHTML = `&nbsp;&nbsp;&rarr; REJECTED. ${candidate.name} prefers their current hold (${oldRole.name}).`;
+                            logContainer.appendChild(logRej);
                         }
                     }
                 }
+                round++;
             }
 
-            // Save globally for export
+            let logEnd = document.createElement('div');
+            logEnd.innerHTML = '<br><strong style="color:white;">--- ALGORITHM TERMINATED (STABLE MATCH REACHED) ---</strong>';
+            logContainer.appendChild(logEnd);
+            logContainer.scrollTop = logContainer.scrollHeight; // Auto-scroll to bottom
+
             finalCandidates = candidates;
             finalRoles = roles;
-
             renderResults(roles, candidates);
         }
 
@@ -251,63 +244,27 @@
 
             Object.values(roles).forEach(role => {
                 let tr = document.createElement('tr');
-                let matchedNames = role.matches.map(id => candidates[id] ? `${candidates[id].name} (${id})` : id).join('<br>');
-                
-                let statusHtml = '<span style="color: #059669; font-weight:bold;">Filled</span>';
-                if (role.matches.length < role.seats) {
-                    statusHtml = `<span class="badge-warning">Missing ${role.seats - role.matches.length} seat(s)</span>`;
-                }
-
+                let matchedNames = role.matches.map(id => candidates[id] ? candidates[id].name : id).join(', ');
                 tr.innerHTML = `
-                    <td style="font-weight:bold;">${role.id}</td>
+                    <td><strong>${role.id}</strong></td>
                     <td>${role.name}</td>
-                    <td>${matchedNames || '<span style="color:#9ca3af; font-style:italic;">Unfilled</span>'}</td>
-                    <td>${statusHtml}</td>
+                    <td>${matchedNames || '<span style="color:#9ca3af;">Unfilled</span>'}</td>
                 `;
                 tbody.appendChild(tr);
             });
-
-            const unmatchedList = document.getElementById('unmatchedList');
-            unmatchedList.innerHTML = '';
-            let unmatchedCount = 0;
-            
-            Object.values(candidates).forEach(cand => {
-                if (!cand.currentMatch) {
-                    unmatchedCount++;
-                    let li = document.createElement('li');
-                    li.innerHTML = `<strong>${cand.name}</strong> (${cand.id}) - <span style="color:#6b7280;">Preferences: ${cand.preferences.join(', ') || 'None'}</span>`;
-                    unmatchedList.appendChild(li);
-                }
-            });
-
-            if (unmatchedCount === 0) {
-                unmatchedList.innerHTML = '<li><span style="color:#059669; font-weight:bold;">All candidates were matched!</span></li>';
-            }
         }
 
         function exportResults() {
-            let csvContent = "data:text/csv;charset=utf-8,";
-            
-            // Header row
-            csvContent += "CandidateID,Name,MatchedRoleID,MatchedRoleName,OriginalPref1\n";
-
+            let csvContent = "data:text/csv;charset=utf-8,CandidateID,Name,MatchedRoleID,MatchedRoleName\n";
             Object.values(finalCandidates).forEach(cand => {
                 let roleId = cand.currentMatch || "UNMATCHED";
                 let roleName = cand.currentMatch ? finalRoles[cand.currentMatch].name : "UNMATCHED";
-                
-                // Escape quotes and commas
-                let safeName = `"${cand.name.replace(/"/g, '""')}"`;
-                let safeRoleName = `"${roleName.replace(/"/g, '""')}"`;
-                let pref1 = cand.preferences[0] || "None";
-
-                let row = `${cand.id},${safeName},${roleId},${safeRoleName},${pref1}`;
-                csvContent += row + "\n";
+                csvContent += `${cand.id},"${cand.name}",${roleId},"${roleName}"\n`;
             });
-
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
-            link.setAttribute("download", "Match_Results.csv");
+            link.setAttribute("download", "Final_Matches.csv");
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);

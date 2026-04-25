@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gale-Shapley Matching Engine</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; background: #f3f4f6; color: #1f2937; line-height: 1.5; }
         .card { background: white; padding: 32px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); margin-bottom: 24px; }
@@ -12,17 +13,21 @@
         .form-group { margin-bottom: 20px; padding: 16px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; }
         label { display: block; font-weight: 600; margin-bottom: 8px; color: #374151; }
         input[type="file"] { display: block; width: 100%; }
-        .btn { background: #2563eb; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 16px; }
+        .btn { background: #2563eb; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 16px; transition: 0.2s; }
         .btn:hover { background: #1d4ed8; }
-        .btn-secondary { background: #10b981; margin-top: 0; }
+        .btn:disabled { background: #9ca3af; cursor: not-allowed; }
+        .btn-secondary { background: #10b981; }
         .btn-secondary:hover { background: #059669; }
+        .btn-outline { background: transparent; border: 2px solid #6b7280; color: #4b5563; }
+        .btn-outline:hover { background: #f3f4f6; }
+        .button-group { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
         table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
         th, td { text-align: left; padding: 12px; border-bottom: 1px solid #e5e7eb; }
         th { background: #f9fafb; font-weight: 600; }
-        .error { color: #dc2626; font-weight: bold; padding: 12px; background: #fee2e2; border-radius: 6px; margin-top: 16px; display: none; }
+        .alert { font-weight: bold; padding: 12px; border-radius: 6px; margin-top: 16px; display: none; }
+        .alert-error { color: #dc2626; background: #fee2e2; border: 1px solid #f87171; }
+        .alert-warning { color: #854d0e; background: #fef08a; border: 1px solid #facc15; font-weight: normal; }
         .badge-warning { background: #fef08a; color: #854d0e; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; }
-        
-        /* Audit log styles */
         .log-container { background: #1f2937; color: #10b981; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 13px; max-height: 300px; overflow-y: auto; margin-top: 24px; display: none; }
         .log-entry { margin-bottom: 4px; }
         .log-swap { color: #f59e0b; }
@@ -37,18 +42,21 @@
         
         <div class="form-group">
             <label>1. Candidates CSV</label>
-            <p style="font-size: 13px; color: #6b7280; margin-top: 0;">Required headers: CandidateID, Name, Pref1...Pref6</p>
             <input type="file" id="candidatesCsv" accept=".csv">
         </div>
 
         <div class="form-group">
             <label>2. Roles & Rankings CSV</label>
-            <p style="font-size: 13px; color: #6b7280; margin-top: 0;">Required headers: RoleID, RoleName, SeatsAvailable (or Seats), Rank1...RankN</p>
             <input type="file" id="rolesCsv" accept=".csv">
         </div>
 
-        <button class="btn" onclick="runAlgorithm()">Run Algorithm</button>
-        <div id="errorMessage" class="error"></div>
+        <div class="button-group">
+            <button class="btn" id="runBtn" onclick="runAlgorithm()">Run Algorithm</button>
+            <button class="btn btn-outline" onclick="resetEngine()">Reset Engine</button>
+        </div>
+
+        <div id="errorMessage" class="alert alert-error"></div>
+        <div id="warningMessage" class="alert alert-warning"></div>
         
         <div id="auditLog" class="log-container"></div>
     </div>
@@ -56,9 +64,10 @@
     <div class="card" id="resultsCard" style="display: none;">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
             <h2>Match Results</h2>
-            <div style="display: flex; align-items: center;">
-                <span id="lastUpdated" style="font-size: 13px; color: #6b7280; margin-right: 16px; font-weight: bold;"></span>
-                <button class="btn btn-secondary" onclick="exportResults()">Download Final Matches (CSV)</button>
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span id="lastUpdated" style="font-size: 13px; color: #6b7280; font-weight: bold;"></span>
+                <button class="btn btn-outline" style="padding: 8px 16px; font-size: 14px;" onclick="exportAuditLog()">Download Log (.txt)</button>
+                <button class="btn btn-secondary" onclick="exportResults()">Download Matches (.csv)</button>
             </div>
         </div>
         
@@ -81,110 +90,139 @@
     <script>
         let finalCandidates = {};
         let finalRoles = {};
+        let rawAuditLogText = [];
 
-        function parseCSV(text) {
-            const result = [];
-            const rows = text.split(/\r?\n/);
-            if (rows.length === 0) return result;
-
-            const splitCSVRow = (str) => {
-                const arr = [];
-                let quote = false; let cell = '';
-                for (let i = 0; i < str.length; i++) {
-                    let char = str[i];
-                    if (char === '"' && str[i+1] === '"') { cell += '"'; i++; } 
-                    else if (char === '"') { quote = !quote; }
-                    else if (char === ',' && !quote) { arr.push(cell.trim()); cell = ''; }
-                    else { cell += char; }
-                }
-                arr.push(cell.trim());
-                return arr;
-            };
-
-            const headers = splitCSVRow(rows[0]);
-            for (let i = 1; i < rows.length; i++) {
-                if (!rows[i].trim()) continue;
-                const values = splitCSVRow(rows[i]);
-                const row = {};
-                headers.forEach((header, index) => { row[header] = values[index] || ''; });
-                result.push(row);
-            }
-            return result;
-        }
-
-        function readFile(file) {
+        function parseFile(file) {
             return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = e => resolve(e.target.result);
-                reader.onerror = e => reject("Error reading file.");
-                reader.readAsText(file);
+                Papa.parse(file, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: (results) => resolve(results.data),
+                    error: (err) => reject(err.message)
+                });
             });
         }
 
-        async function runAlgorithm() {
+        function resetEngine() {
+            document.getElementById('candidatesCsv').value = "";
+            document.getElementById('rolesCsv').value = "";
+            document.getElementById('resultsCard').style.display = 'none';
+            document.getElementById('auditLog').style.display = 'none';
             document.getElementById('errorMessage').style.display = 'none';
+            document.getElementById('warningMessage').style.display = 'none';
+            finalCandidates = {};
+            finalRoles = {};
+            rawAuditLogText = [];
+        }
+
+        async function runAlgorithm() {
+            const runBtn = document.getElementById('runBtn');
+            const errDiv = document.getElementById('errorMessage');
+            const warnDiv = document.getElementById('warningMessage');
             const logContainer = document.getElementById('auditLog');
+
+            runBtn.disabled = true;
+            runBtn.textContent = "Processing...";
+            errDiv.style.display = 'none';
+            warnDiv.style.display = 'none';
+            warnDiv.innerHTML = '';
+            
             logContainer.innerHTML = '<div style="color:white; margin-bottom:8px; font-weight:bold;">--- ALGORITHM ENGINE STARTED ---</div>';
             logContainer.style.display = 'block';
+            rawAuditLogText = ["--- ALGORITHM ENGINE STARTED ---"];
 
             const candFile = document.getElementById('candidatesCsv').files[0];
             const roleFile = document.getElementById('rolesCsv').files[0];
 
             if (!candFile || !roleFile) {
-                document.getElementById('errorMessage').textContent = "Please upload both CSV files.";
-                document.getElementById('errorMessage').style.display = 'block';
+                errDiv.textContent = "Please upload both CSV files.";
+                errDiv.style.display = 'block';
+                runBtn.disabled = false;
+                runBtn.textContent = "Run Algorithm";
                 return;
             }
 
             try {
-                const candData = parseCSV(await readFile(candFile));
-                const roleData = parseCSV(await readFile(roleFile));
-                executeGaleShapley(candData, roleData, logContainer);
+                const candData = await parseFile(candFile);
+                const roleData = await parseFile(roleFile);
+                executeGaleShapley(candData, roleData, logContainer, warnDiv);
             } catch (err) {
-                document.getElementById('errorMessage').textContent = "System Error: " + err;
-                document.getElementById('errorMessage').style.display = 'block';
+                errDiv.textContent = "System Error: " + err;
+                errDiv.style.display = 'block';
             }
+            
+            runBtn.disabled = false;
+            runBtn.textContent = "Run Algorithm";
         }
 
-        function executeGaleShapley(candData, roleData, logContainer) {
+        function addToLog(container, htmlContent, plainText) {
+            let div = document.createElement('div');
+            div.className = 'log-entry';
+            div.innerHTML = htmlContent;
+            container.appendChild(div);
+            rawAuditLogText.push(plainText);
+        }
+
+        function executeGaleShapley(candData, roleData, logContainer, warnDiv) {
             let candidates = {};
+            let roles = {};
+            let warnings = [];
+
             candData.forEach(c => {
-                if(!c.CandidateID) return;
-                candidates[c.CandidateID] = {
-                    id: c.CandidateID,
-                    name: c.Name || c.CandidateID,
-                    preferences: [c.Pref1, c.Pref2, c.Pref3, c.Pref4, c.Pref5, c.Pref6].filter(Boolean),
-                    currentMatch: null
-                };
+                let idKey = Object.keys(c).find(k => k.toLowerCase().includes('candidateid') || k.toLowerCase() === 'id');
+                if(!idKey || !c[idKey]) return;
+                let id = String(c[idKey]).trim().toUpperCase();
+                
+                let prefs = [];
+                Object.keys(c).forEach(k => {
+                    if (k.toLowerCase().includes('pref') && c[k]) prefs.push(String(c[k]).trim().toUpperCase());
+                });
+
+                candidates[id] = { id: id, name: c.Name ? String(c.Name).trim() : id, preferences: prefs, currentMatch: null };
             });
 
-            let roles = {};
             roleData.forEach(r => {
-                if(!r.RoleID) return;
+                let idKey = Object.keys(r).find(k => k.toLowerCase().includes('roleid') || k.toLowerCase() === 'id');
+                if(!idKey || !r[idKey]) return;
+                let id = String(r[idKey]).trim().toUpperCase();
+
                 let rankings = [];
                 Object.keys(r).forEach(key => {
-                    if (key.startsWith('Rank') && r[key]) rankings.push(r[key]);
+                    if (key.trim().toLowerCase().startsWith('rank') && r[key]) {
+                        rankings.push(String(r[key]).trim().toUpperCase());
+                    }
                 });
                 
-                // FIXED: More robust check for "Seats Available" to support different header formats
-                let seatsParsed = parseInt(r.SeatsAvailable || r['Seats Available'] || r.Seats || r.seats);
-                let actualSeats = isNaN(seatsParsed) ? 1 : seatsParsed;
+                // FUZZY SEAT SEARCH: Finds any column with "seat" in the name
+                let seatKey = Object.keys(r).find(k => k.toLowerCase().includes('seat'));
+                let actualSeats = seatKey ? parseInt(r[seatKey]) : 1;
+                if (isNaN(actualSeats)) actualSeats = 1;
 
-                roles[r.RoleID] = {
-                    id: r.RoleID,
-                    name: r.RoleName || r.RoleID,
+                if (rankings.length < actualSeats) {
+                    warnings.push(`<strong>${id}</strong> wants ${actualSeats} seats, but only ranked ${rankings.length} candidates. It will be impossible to fill this role.`);
+                }
+
+                roles[id] = {
+                    id: id,
+                    name: r.RoleName ? String(r.RoleName).trim() : id,
                     seats: actualSeats,
                     rankings: rankings,
                     proposedIndex: 0,
-                    matches: []
+                    matches: [] // Array holds multiple candidates for multi-seat booths
                 };
             });
+
+            if (warnings.length > 0) {
+                warnDiv.innerHTML = "<strong>Data Warnings:</strong><ul>" + warnings.map(w => `<li>${w}</li>`).join('') + "</ul>";
+                warnDiv.style.display = 'block';
+            }
 
             let matchingComplete = false;
             let round = 1;
 
-            while (!matchingComplete && round < 1000) {
+            while (!matchingComplete && round < 2000) {
                 matchingComplete = true; 
+                // A role is active if it has fewer matches than seats AND still has people left to ask
                 let activeRoles = Object.values(roles).filter(r => r.matches.length < r.seats && r.proposedIndex < r.rankings.length);
 
                 for (let role of activeRoles) {
@@ -195,19 +233,12 @@
                     let candidate = candidates[candidateId];
                     if (!candidate) continue; 
 
-                    let logMsg = document.createElement('div');
-                    logMsg.className = 'log-entry';
-                    logMsg.textContent = `[Round ${round}] ${role.name} proposes to ${candidate.name}.`;
-                    logContainer.appendChild(logMsg);
+                    addToLog(logContainer, `[Round ${round}] ${role.name} proposes to ${candidate.name}.`, `[Round ${round}] ${role.name} proposes to ${candidate.name}.`);
 
                     if (!candidate.currentMatch) {
                         candidate.currentMatch = role.id;
                         role.matches.push(candidate.id);
-                        
-                        let logAcc = document.createElement('div');
-                        logAcc.className = 'log-entry';
-                        logAcc.innerHTML = `&nbsp;&nbsp;&rarr; ${candidate.name} is free. <strong>Tentatively accepts.</strong>`;
-                        logContainer.appendChild(logAcc);
+                        addToLog(logContainer, `&nbsp;&nbsp;&rarr; ${candidate.name} is free. <strong>Tentatively accepts.</strong>`, `  -> ${candidate.name} is free. Tentatively accepts.`);
                     } else {
                         let currentMatchId = candidate.currentMatch;
                         let oldRole = roles[currentMatchId];
@@ -220,42 +251,32 @@
                         if (rankNew < rankCurrent) {
                             candidate.currentMatch = role.id;
                             role.matches.push(candidate.id);
+                            // Dump the candidate from the old role's array
                             oldRole.matches = oldRole.matches.filter(id => id !== candidate.id);
                             
-                            let logSwap = document.createElement('div');
-                            logSwap.className = 'log-entry log-swap';
-                            logSwap.innerHTML = `&nbsp;&nbsp;&rarr; SWAP! ${candidate.name} prefers ${role.name}. Dumps ${oldRole.name}.`;
-                            logContainer.appendChild(logSwap);
+                            addToLog(logContainer, `&nbsp;&nbsp;&rarr; <span class="log-swap">SWAP! ${candidate.name} prefers ${role.name}. Dumps ${oldRole.name}.</span>`, `  -> SWAP! ${candidate.name} prefers ${role.name}. Dumps ${oldRole.name}.`);
                         } else {
-                            let logRej = document.createElement('div');
-                            logRej.className = 'log-entry log-reject';
-                            logRej.innerHTML = `&nbsp;&nbsp;&rarr; REJECTED. ${candidate.name} prefers their current hold (${oldRole.name}).`;
-                            logContainer.appendChild(logRej);
+                            addToLog(logContainer, `&nbsp;&nbsp;&rarr; <span class="log-reject">REJECTED. ${candidate.name} prefers their current hold (${oldRole.name}).</span>`, `  -> REJECTED. ${candidate.name} prefers their current hold (${oldRole.name}).`);
                         }
                     }
                 }
                 round++;
             }
 
-            let logEnd = document.createElement('div');
-            logEnd.innerHTML = '<br><strong style="color:white;">--- ALGORITHM TERMINATED (STABLE MATCH REACHED) ---</strong>';
-            logContainer.appendChild(logEnd);
+            addToLog(logContainer, '<br><strong style="color:white;">--- ALGORITHM TERMINATED ---</strong>', '\n--- ALGORITHM TERMINATED ---');
             logContainer.scrollTop = logContainer.scrollHeight; 
 
             finalCandidates = candidates;
             finalRoles = roles;
             
-            // Add the Timestamp
             let now = new Date();
-            document.getElementById('lastUpdated').textContent = "Last Run: " + now.toLocaleTimeString() + " on " + now.toLocaleDateString();
+            document.getElementById('lastUpdated').textContent = "Last Run: " + now.toLocaleTimeString();
 
             renderResults(roles, candidates);
         }
 
         function renderResults(roles, candidates) {
             document.getElementById('resultsCard').style.display = 'block';
-            
-            // 1. Render Matched Roles Table
             const tbody = document.querySelector('#resultsTable tbody');
             tbody.innerHTML = '';
 
@@ -263,7 +284,7 @@
                 let tr = document.createElement('tr');
                 let matchedNames = role.matches.map(id => candidates[id] ? `${candidates[id].name} (${id})` : id).join('<br>');
                 
-                let statusHtml = '<span style="color: #059669; font-weight:bold;">Filled</span>';
+                let statusHtml = `<span style="color: #059669; font-weight:bold;">Filled (${role.matches.length}/${role.seats})</span>`;
                 if (role.matches.length < role.seats) {
                     statusHtml = `<span class="badge-warning">Missing ${role.seats - role.matches.length} seat(s)</span>`;
                 }
@@ -277,7 +298,6 @@
                 tbody.appendChild(tr);
             });
 
-            // 2. Render Unmatched Candidates List
             const unmatchedList = document.getElementById('unmatchedList');
             unmatchedList.innerHTML = '';
             let unmatchedCount = 0;
@@ -286,27 +306,27 @@
                 if (!cand.currentMatch) {
                     unmatchedCount++;
                     let li = document.createElement('li');
-                    li.innerHTML = `<strong>${cand.name}</strong> (${cand.id}) - <span style="color:#6b7280;">Preferences: ${cand.preferences.join(', ') || 'None'}</span>`;
+                    li.innerHTML = `<strong>${cand.name}</strong> (${cand.id})`;
                     unmatchedList.appendChild(li);
                 }
             });
 
-            if (unmatchedCount === 0) {
-                unmatchedList.innerHTML = '<li><span style="color:#059669; font-weight:bold;">All candidates were successfully matched!</span></li>';
-            }
+            if (unmatchedCount === 0) unmatchedList.innerHTML = '<li><span style="color:#059669; font-weight:bold;">All matched!</span></li>';
         }
 
         function exportResults() {
-            let csvContent = "data:text/csv;charset=utf-8,CandidateID,Name,MatchedRoleID,MatchedRoleName\n";
+            let csvContent = "CandidateID,Name,MatchedRoleID,MatchedRoleName\n";
             Object.values(finalCandidates).forEach(cand => {
                 let roleId = cand.currentMatch || "UNMATCHED";
                 let roleName = cand.currentMatch ? finalRoles[cand.currentMatch].name : "UNMATCHED";
-                csvContent += `${cand.id},"${cand.name}",${roleId},"${roleName}"\n`;
+                let safeName = `"${cand.name.replace(/"/g, '""')}"`;
+                let safeRoleName = `"${roleName.replace(/"/g, '""')}"`;
+                csvContent += `${cand.id},${safeName},${roleId},${safeRoleName}\n`;
             });
-            const encodedUri = encodeURI(csvContent);
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement("a");
-            link.setAttribute("href", encodedUri);
-            link.setAttribute("download", "Final_Matches.csv");
+            link.href = URL.createObjectURL(blob);
+            link.download = "Final_Matches.csv";
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);

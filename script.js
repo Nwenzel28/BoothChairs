@@ -81,9 +81,10 @@ async function runAlgorithm() {
 
 function executeGaleShapley(candData, roleData, warnDiv) {
   let candidates = {};
-  let roles        = {};
-  let warnings    = [];
+  let roles      = {};
+  let warnings   = [];
 
+  // Parse Candidates
   candData.forEach(row => {
     const keys  = Object.keys(row);
     const idKey = keys.find(k => /candidateid|^id$/i.test(k.trim()));
@@ -106,12 +107,16 @@ function executeGaleShapley(candData, roleData, warnDiv) {
     const gradeKey = keys.find(k => /grade/i.test(k.trim()));
 
     candidates[id] = {
-      id, name, preferences: prefs,
+      id, 
+      name, 
+      preferences: prefs,
       grade: gradeKey ? row[gradeKey].trim() : '',
-      currentMatch: null
+      currentMatch: null,
+      proposedIndex: 0 // Track how far down their list the candidate has gone
     };
   });
 
+  // Parse Roles
   roleData.forEach(row => {
     const keys  = Object.keys(row);
     const idKey = keys.find(k => /roleid|^id$/i.test(k.trim()));
@@ -141,8 +146,7 @@ function executeGaleShapley(candData, roleData, warnDiv) {
       id, name, seats, rankings,
       division:      divKey  ? row[divKey].trim()  : '',
       tier:          tierKey ? row[tierKey].trim()  : '',
-      proposedIndex: 0,
-      matches:       []
+      matches:       [] // Array of candidate IDs currently holding a seat
     };
   });
 
@@ -162,48 +166,76 @@ function executeGaleShapley(candData, roleData, warnDiv) {
     warnDiv.style.display = 'block';
   }
 
+  // ALGORITHM LOGIC: Candidate-Proposing Gale-Shapley
   let isRunning = true;
   let round = 1;
 
   while (isRunning && round < 5000) {
-    const active = Object.values(roles).filter(
-      r => r.matches.length < r.seats && r.proposedIndex < r.rankings.length
+    // Find all candidates who are unmatched AND still have booths on their list to ask
+    const activeCandidates = Object.values(candidates).filter(
+      c => !c.currentMatch && c.proposedIndex < c.preferences.length
     );
     
-    if (!active.length) {
+    if (!activeCandidates.length) {
       isRunning = false;
       break;
     }
 
     addLog(`<span class="log-round">── Round ${round}</span>`, `\n── Round ${round}`, 'log-round');
 
-    for (const role of active) {
-      while (role.matches.length < role.seats && role.proposedIndex < role.rankings.length) {
-        const candId = role.rankings[role.proposedIndex++];
-        const cand = candidates[candId];
-        if (!cand) continue;
+    for (const cand of activeCandidates) {
+      const roleId = cand.preferences[cand.proposedIndex++];
+      const role = roles[roleId];
 
-        addLog(`${role.name} → ${cand.name}`, `${role.name} -> ${cand.name}`);
+      if (!role) {
+        addLog(`${cand.name} → ${roleId}`, `${cand.name} -> ${roleId}`);
+        addLog(`&nbsp;&nbsp;<span class="log-reject">✗ rejected (Booth ID not found)</span>`, `  rejected`, 'log-reject');
+        continue;
+      }
 
-        if (!cand.currentMatch) {
-          cand.currentMatch = role.id;
-          role.matches.push(cand.id);
-          addLog(`&nbsp;&nbsp;<span class="log-accept">✓ accepted</span>`, `  accepted`, 'log-accept');
-        } else {
-          const heldRole = roles[cand.currentMatch];
-          const ah = cand.preferences.indexOf(cand.currentMatch);
-          const an = cand.preferences.indexOf(role.id);
-          const adjH = ah === -1 ? 9999 : ah;
-          const adjN = an === -1 ? 9999 : an;
+      addLog(`${cand.name} → ${role.name}`, `${cand.name} -> ${role.name}`);
 
-          if (adjN < adjH) {
-            if (heldRole) heldRole.matches = heldRole.matches.filter(id => id !== cand.id);
-            cand.currentMatch = role.id;
-            role.matches.push(cand.id);
-            addLog(`&nbsp;&nbsp;<span class="log-swap">⇄ swapped from ${heldRole ? heldRole.name : '?'}</span>`, `  swapped`, 'log-swap');
-          } else {
-            addLog(`&nbsp;&nbsp;<span class="log-reject">✗ rejected</span>`, `  rejected`, 'log-reject');
+      // Check if the role actually ranked this candidate. If not, auto-reject.
+      const candRankInRole = role.rankings.indexOf(cand.id);
+      if (candRankInRole === -1) {
+        addLog(`&nbsp;&nbsp;<span class="log-reject">✗ rejected (Candidate not ranked by booth)</span>`, `  rejected`, 'log-reject');
+        continue;
+      }
+
+      // If the booth has open seats, tentatively accept the candidate
+      if (role.matches.length < role.seats) {
+        cand.currentMatch = role.id;
+        role.matches.push(cand.id);
+        addLog(`&nbsp;&nbsp;<span class="log-accept">✓ accepted</span>`, `  accepted`, 'log-accept');
+      } else {
+        // Booth is full. Find the *least* preferred candidate currently holding a seat.
+        // Higher index in role.rankings = worse preference.
+        let worstCandId = null;
+        let worstRank = -1;
+        let worstIndexInMatches = -1;
+
+        for (let i = 0; i < role.matches.length; i++) {
+          const matchedCandId = role.matches[i];
+          const rank = role.rankings.indexOf(matchedCandId);
+          if (rank > worstRank) {
+            worstRank = rank;
+            worstCandId = matchedCandId;
+            worstIndexInMatches = i;
           }
+        }
+
+        // Compare the new applicant to the worst current hold
+        if (candRankInRole < worstRank) {
+          // The new applicant is better! Dump the old one.
+          const dumpedCand = candidates[worstCandId];
+          dumpedCand.currentMatch = null; // Sent back to the active pool for the next round
+          
+          role.matches[worstIndexInMatches] = cand.id;
+          cand.currentMatch = role.id;
+          addLog(`&nbsp;&nbsp;<span class="log-swap">⇄ accepted (dumped ${dumpedCand.name})</span>`, `  swapped`, 'log-swap');
+        } else {
+          // The booth prefers everyone it currently has.
+          addLog(`&nbsp;&nbsp;<span class="log-reject">✗ rejected (booth full)</span>`, `  rejected`, 'log-reject');
         }
       }
     }
@@ -254,7 +286,13 @@ function renderResults(roles, candidates) {
   tbody.innerHTML = '';
   Object.values(roles).forEach(role => {
     const tr = document.createElement('tr');
-    const matchedHtml = role.matches.map(cid => {
+    
+    // Sort matched candidates by how much the booth preferred them
+    const sortedMatches = [...role.matches].sort((a, b) => {
+        return role.rankings.indexOf(a) - role.rankings.indexOf(b);
+    });
+
+    const matchedHtml = sortedMatches.map(cid => {
       const c  = candidates[cid];
       if (!c) return cid;
       const rk  = c.preferences.indexOf(role.id) + 1;

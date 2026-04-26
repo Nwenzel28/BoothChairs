@@ -292,7 +292,6 @@
 
 <div class="page">
 
-  <!-- Upload -->
   <section>
     <h2>Upload Data</h2>
     <div class="file-row">
@@ -356,7 +355,6 @@
     </div>
   </section>
 
-  <!-- Log -->
   <div class="log-wrap" id="logWrap">
     <div class="log-toolbar">
       <span class="log-toolbar-title">EXECUTION LOG</span>
@@ -365,7 +363,6 @@
     <div class="log-body" id="auditLog"></div>
   </div>
 
-  <!-- Results -->
   <div id="resultsCard" style="display:none;">
 
     <section>
@@ -491,7 +488,7 @@ async function runAlgorithm() {
 
 function executeGaleShapley(candData, roleData, warnDiv) {
   let candidates = {};
-  let roles       = {};
+  let roles        = {};
   let warnings    = [];
 
   candData.forEach(row => {
@@ -508,9 +505,10 @@ function executeGaleShapley(candData, roleData, warnDiv) {
       name = [fn && row[fn], ln && row[ln]].filter(Boolean).join(' ') || id;
     }
 
+    // FIX 2 APPLIED HERE: Proper numeric sorting for preference headers
     const prefs = keys
       .filter(k => /^pref\d*/i.test(k.trim()) && row[k])
-      .sort()
+      .sort((a, b) => parseInt(a.replace(/\D/g,'')) - parseInt(b.replace(/\D/g,'')))
       .map(k => row[k].trim().toUpperCase());
 
     const gradeKey = keys.find(k => /grade/i.test(k.trim()));
@@ -572,25 +570,26 @@ function executeGaleShapley(candData, roleData, warnDiv) {
     warnDiv.style.display = 'block';
   }
 
-  // Gale-Shapley — role-proposing, multi-seat
-  let changed = true, round = 1;
+  // FIX 1 & 3 APPLIED HERE: Proper loop termination and rejection tracking
+  let isRunning = true;
+  let round = 1;
 
-  while (changed && round < 5000) {
-    changed = false;
+  while (isRunning && round < 5000) {
     const active = Object.values(roles).filter(
       r => r.matches.length < r.seats && r.proposedIndex < r.rankings.length
     );
-    if (!active.length) break;
+    
+    if (!active.length) {
+      isRunning = false;
+      break;
+    }
 
     addLog(`<span class="log-round">── Round ${round}</span>`, `\n── Round ${round}`, 'log-round');
 
     for (const role of active) {
-      const open = role.seats - role.matches.length;
-      let fired  = 0;
-
-      while (fired < open && role.proposedIndex < role.rankings.length) {
+      // Keep proposing until seats are full or we run out of candidates to ask
+      while (role.matches.length < role.seats && role.proposedIndex < role.rankings.length) {
         const candId = role.rankings[role.proposedIndex++];
-        fired++;
         const cand = candidates[candId];
         if (!cand) continue;
 
@@ -599,7 +598,6 @@ function executeGaleShapley(candData, roleData, warnDiv) {
         if (!cand.currentMatch) {
           cand.currentMatch = role.id;
           role.matches.push(cand.id);
-          changed = true;
           addLog(`&nbsp;&nbsp;<span class="log-accept">✓ accepted</span>`, `  accepted`, 'log-accept');
         } else {
           const heldRole = roles[cand.currentMatch];
@@ -612,7 +610,6 @@ function executeGaleShapley(candData, roleData, warnDiv) {
             if (heldRole) heldRole.matches = heldRole.matches.filter(id => id !== cand.id);
             cand.currentMatch = role.id;
             role.matches.push(cand.id);
-            changed = true;
             addLog(`&nbsp;&nbsp;<span class="log-swap">⇄ swapped from ${heldRole ? heldRole.name : '?'}</span>`, `  swapped`, 'log-swap');
           } else {
             addLog(`&nbsp;&nbsp;<span class="log-reject">✗ rejected</span>`, `  rejected`, 'log-reject');

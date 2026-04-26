@@ -112,7 +112,7 @@ function executeGaleShapley(candData, roleData, warnDiv) {
       preferences: prefs,
       grade: gradeKey ? row[gradeKey].trim() : '',
       currentMatch: null,
-      proposedIndex: 0 // Track how far down their list the candidate has gone
+      proposedIndex: 0 
     };
   });
 
@@ -146,32 +146,62 @@ function executeGaleShapley(candData, roleData, warnDiv) {
       id, name, seats, rankings,
       division:      divKey  ? row[divKey].trim()  : '',
       tier:          tierKey ? row[tierKey].trim()  : '',
-      matches:       [] // Array of candidate IDs currently holding a seat
+      matches:       [] 
     };
   });
 
-  if (!Object.keys(candidates).length) {
-    document.getElementById('errorMessage').textContent = 'No candidates found. Check your CSV headers.';
-    document.getElementById('errorMessage').style.display = 'block';
-    return;
-  }
-  if (!Object.keys(roles).length) {
-    document.getElementById('errorMessage').textContent = 'No roles found. Check your CSV headers.';
+  if (!Object.keys(candidates).length || !Object.keys(roles).length) {
+    document.getElementById('errorMessage').textContent = 'Missing candidates or roles data.';
     document.getElementById('errorMessage').style.display = 'block';
     return;
   }
 
-  if (warnings.length) {
-    warnDiv.innerHTML = '<strong>Warnings:</strong><ul>' + warnings.map(w => `<li>${w}</li>`).join('') + '</ul>';
-    warnDiv.style.display = 'block';
+  // --- SYNTHETIC RANKING PRE-CALCULATION ---
+  // 1. Collect all rank ratios for each candidate across all booths
+  let candRatios = {};
+  for (let c in candidates) candRatios[c] = [];
+
+  Object.values(roles).forEach(role => {
+    role.rankings.forEach((candId, idx) => {
+      if (candRatios[candId]) {
+        let rankValue = idx + 1; // 1-based ranking
+        candRatios[candId].push(rankValue / role.seats);
+      }
+    });
+  });
+
+  // 2. Average those ratios out
+  let candAvgRatio = {};
+  for (let c in candidates) {
+    let ratios = candRatios[c];
+    if (ratios.length > 0) {
+      candAvgRatio[c] = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+    } else {
+      // If a candidate was NEVER ranked by ANY booth, give them a poor fallback ratio (e.g., 3.0)
+      // This ensures they are considered, but only after all other synthetically ranked candidates.
+      candAvgRatio[c] = 3.0; 
+    }
+  }
+  // -----------------------------------------
+
+  // Helper function to get a candidate's effective rank for a specific role
+  function getEffectiveRank(role, candId) {
+    const explicitRank = role.rankings.indexOf(candId);
+    if (explicitRank !== -1) {
+      return explicitRank; // 0-indexed, so 0 is best
+    } else {
+      // Your formula: Worst explicit rank + (Average Ratio * Booth Seats)
+      const worstExplicitRank = role.rankings.length; 
+      const syntheticPenalty = candAvgRatio[candId] * role.seats;
+      return worstExplicitRank + syntheticPenalty;
+    }
   }
 
-  // ALGORITHM LOGIC: Candidate-Proposing Gale-Shapley
+  // ALGORITHM LOGIC: Candidate-Proposing Gale-Shapley (with synthetic walk-ins)
   let isRunning = true;
   let round = 1;
 
   while (isRunning && round < 5000) {
-    // Find all candidates who are unmatched AND still have booths on their list to ask
     const activeCandidates = Object.values(candidates).filter(
       c => !c.currentMatch && c.proposedIndex < c.preferences.length
     );
@@ -187,54 +217,43 @@ function executeGaleShapley(candData, roleData, warnDiv) {
       const roleId = cand.preferences[cand.proposedIndex++];
       const role = roles[roleId];
 
-      if (!role) {
-        addLog(`${cand.name} → ${roleId}`, `${cand.name} -> ${roleId}`);
-        addLog(`&nbsp;&nbsp;<span class="log-reject">✗ rejected (Booth ID not found)</span>`, `  rejected`, 'log-reject');
-        continue;
-      }
-
+      if (!role) continue;
       addLog(`${cand.name} → ${role.name}`, `${cand.name} -> ${role.name}`);
 
-      // Check if the role actually ranked this candidate. If not, auto-reject.
-      const candRankInRole = role.rankings.indexOf(cand.id);
-      if (candRankInRole === -1) {
-        addLog(`&nbsp;&nbsp;<span class="log-reject">✗ rejected (Candidate not ranked by booth)</span>`, `  rejected`, 'log-reject');
-        continue;
-      }
+      const candEffectiveRank = getEffectiveRank(role, cand.id);
+      const isWalkIn = role.rankings.indexOf(cand.id) === -1;
+      const walkInTag = isWalkIn ? ` <span style="font-size:0.8em;color:#888;">(walk-in rank: ${candEffectiveRank.toFixed(1)})</span>` : '';
 
-      // If the booth has open seats, tentatively accept the candidate
       if (role.matches.length < role.seats) {
         cand.currentMatch = role.id;
         role.matches.push(cand.id);
-        addLog(`&nbsp;&nbsp;<span class="log-accept">✓ accepted</span>`, `  accepted`, 'log-accept');
+        addLog(`&nbsp;&nbsp;<span class="log-accept">✓ accepted${walkInTag}</span>`, `  accepted`);
       } else {
-        // Booth is full. Find the *least* preferred candidate currently holding a seat.
-        // Higher index in role.rankings = worse preference.
+        // Booth full. Find the worst matched candidate using the effective rank logic.
         let worstCandId = null;
         let worstRank = -1;
         let worstIndexInMatches = -1;
 
         for (let i = 0; i < role.matches.length; i++) {
           const matchedCandId = role.matches[i];
-          const rank = role.rankings.indexOf(matchedCandId);
-          if (rank > worstRank) {
-            worstRank = rank;
+          const matchedEffectiveRank = getEffectiveRank(role, matchedCandId);
+
+          if (matchedEffectiveRank > worstRank) {
+            worstRank = matchedEffectiveRank;
             worstCandId = matchedCandId;
             worstIndexInMatches = i;
           }
         }
 
-        // Compare the new applicant to the worst current hold
-        if (candRankInRole < worstRank) {
-          // The new applicant is better! Dump the old one.
+        // Compare new applicant to worst current hold
+        if (candEffectiveRank < worstRank) {
           const dumpedCand = candidates[worstCandId];
-          dumpedCand.currentMatch = null; // Sent back to the active pool for the next round
+          dumpedCand.currentMatch = null; 
           
           role.matches[worstIndexInMatches] = cand.id;
           cand.currentMatch = role.id;
-          addLog(`&nbsp;&nbsp;<span class="log-swap">⇄ accepted (dumped ${dumpedCand.name})</span>`, `  swapped`, 'log-swap');
+          addLog(`&nbsp;&nbsp;<span class="log-swap">⇄ accepted${walkInTag} (dumped ${dumpedCand.name})</span>`, `  swapped`);
         } else {
-          // The booth prefers everyone it currently has.
           addLog(`&nbsp;&nbsp;<span class="log-reject">✗ rejected (booth full)</span>`, `  rejected`, 'log-reject');
         }
       }
@@ -243,7 +262,6 @@ function executeGaleShapley(candData, roleData, warnDiv) {
   }
 
   addLog('<span class="log-done">Algorithm complete.</span>', 'Algorithm complete.', 'log-done');
-
   finalCandidates = candidates;
   finalRoles      = roles;
   document.getElementById('lastUpdated').textContent = new Date().toLocaleString();
@@ -284,12 +302,26 @@ function renderResults(roles, candidates) {
 
   const tbody = document.querySelector('#resultsTable tbody');
   tbody.innerHTML = '';
+  
+  // Helper for rendering to easily calculate synthetic ranks for the UI
+  function getEffectiveRankUI(role, candId) {
+     const explicitRank = role.rankings.indexOf(candId);
+     if (explicitRank !== -1) return explicitRank;
+     let ratios = [];
+     Object.values(roles).forEach(r => {
+        let idx = r.rankings.indexOf(candId);
+        if(idx !== -1) ratios.push((idx+1)/r.seats);
+     });
+     let avgRatio = ratios.length > 0 ? (ratios.reduce((a,b)=>a+b,0)/ratios.length) : 3.0;
+     return role.rankings.length + (avgRatio * role.seats);
+  }
+
   Object.values(roles).forEach(role => {
     const tr = document.createElement('tr');
     
-    // Sort matched candidates by how much the booth preferred them
+    // Sort matched candidates by their effective rank
     const sortedMatches = [...role.matches].sort((a, b) => {
-        return role.rankings.indexOf(a) - role.rankings.indexOf(b);
+        return getEffectiveRankUI(role, a) - getEffectiveRankUI(role, b);
     });
 
     const matchedHtml = sortedMatches.map(cid => {
@@ -298,7 +330,9 @@ function renderResults(roles, candidates) {
       const rk  = c.preferences.indexOf(role.id) + 1;
       const cls = rk === 1 ? 'p1' : rk === 2 ? 'p2' : rk === 3 ? 'p3' : rk === 4 ? 'p4' : 'pn';
       const lbl = rk === 0 ? 'unlisted' : `#${rk}`;
-      return `${c.name} <span class="pref-tag ${cls}">${lbl}</span>`;
+      const isWalkIn = role.rankings.indexOf(cid) === -1;
+      const asterisk = isWalkIn ? ' <span style="color:#888;" title="Walk-In">*</span>' : '';
+      return `${c.name}${asterisk} <span class="pref-tag ${cls}">${lbl}</span>`;
     }).join('<br>') || '<span style="color:#bbb;font-style:italic;">None</span>';
 
     const f = role.matches.length, s = role.seats;
